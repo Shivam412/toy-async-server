@@ -12,16 +12,15 @@ fn main() -> Result<()> {
     loop {
         match listener.accept() {
             Ok((mut stream, addr)) => {
-                println!("Accepted the connection on {:?}", addr);
-                handle_client(&mut stream)?;
-                println!("Closing the connection");
+                std::thread::spawn(move || handle_client(&mut stream, addr).unwrap());
             }
             Err(err) => eprintln!("{err}"),
         }
     }
 }
 
-fn handle_client(stream: &mut net::TcpStream) -> Result<()> {
+fn handle_client(stream: &mut net::TcpStream, addr: SocketAddrV4) -> Result<()> {
+    println!("Accepted the connection on {:?}", addr);
     let mut incoming = Vec::new();
     loop {
         let mut buff = [0_u8; 1024];
