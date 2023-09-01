@@ -34,20 +34,21 @@ fn main() -> Result<()> {
 
         // Process each event from epoll
         for event in events {
-            if event.events & EPOLLIN as u32 != 0 {
+            // Check for incoming connection on the socket.
+            if event.u64 == listener.fd() as u64 {
+                // Accept a new client connection.
+                let (stream, addr) = listener.accept()?;
+                println!("Accepted a new client connection from: {:?}", addr);
+                // Add the stream socket to epoll for events.
+                epoll.add_fd(
+                    stream.fd(),
+                    (EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLHUP) as u32,
+                )?;
+                // Add the stream to the hashmap.
+                streams.insert(stream.fd(), stream);
+            } else if event.events & EPOLLIN as u32 != 0 {
                 // If the event is an incoming data event, handle it
-                if event.u64 == listener.fd() as u64 {
-                    // Accept a new client connection.
-                    let (stream, addr) = listener.accept()?;
-                    println!("Accepted a new client connection from: {:?}", addr);
-                    // Add the stream socket to epoll for events.
-                    epoll.add_fd(
-                        stream.fd(),
-                        (EPOLLIN | EPOLLET | EPOLLRDHUP | EPOLLHUP) as u32,
-                    )?;
-                    // Add the stream to the hashmap.
-                    streams.insert(stream.fd(), stream);
-                } else if let Some(stream) = streams.get_mut(&(event.u64 as c_int)) {
+                if let Some(stream) = streams.get_mut(&(event.u64 as c_int)) {
                     // Handle data read/write for existing client stream.
                     handle_client(stream)?;
                 }
@@ -71,13 +72,13 @@ fn handle_client(stream: &mut net::TcpStream) -> Result<()> {
         match stream.read(&mut buff) {
             Ok(count) if count > 0 => {
                 incoming.extend_from_slice(&buff[..count as usize]);
-
-                if let Err(err) = stream.write(&buff) {
-                    eprintln!("Error writing to client: {err}");
-                }
             }
             Ok(_) | Err(_) => break,
         }
+    }
+
+    if let Err(err) = stream.write(&incoming) {
+        eprintln!("Error writing to client: {err}");
     }
 
     Ok(())

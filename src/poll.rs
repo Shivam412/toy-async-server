@@ -54,9 +54,10 @@ impl Epoll {
     pub fn wait(&self) -> Result<Vec<epoll_event>> {
         // Create an array of epoll_event structs to store events
         let mut events: [epoll_event; 1024] = unsafe { std::mem::zeroed() };
+        let max_events = 1024;
 
         // Wait for events using epoll_wait syscall
-        let num_events = unsafe { libc::epoll_wait(self.fd, events.as_mut_ptr(), 1024, -1) };
+        let num_events = unsafe { libc::epoll_wait(self.fd, events.as_mut_ptr(), max_events, -1) };
 
         // Check if epoll_wait was successful
         if num_events == -1 {
