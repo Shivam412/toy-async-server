@@ -1,5 +1,11 @@
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+
 use super::{socketv4::SocketAddrV4, tcp_stream::TcpStream};
-use crate::helpers::{get_error_message, Result};
+use crate::core::{
+    error::{self, IOError},
+    os,
+    result::Result,
+};
 
 use libc::{
     c_uint, c_ushort, sockaddr, sockaddr_in, AF_INET, F_GETFL, F_SETFL, IPPROTO_TCP, O_NONBLOCK,
@@ -9,29 +15,34 @@ use libc::{
 // Define a structure representing a TCP listener
 #[derive(Debug)]
 pub struct TcpListener {
-    addr: SocketAddrV4,
     fd: i32,
 }
 
-impl TcpListener {
-    // Get the address the listener is bound to
-    pub fn address(&self) -> &SocketAddrV4 {
-        &self.addr
+impl AsRawFd for TcpListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
     }
+}
 
+impl AsFd for TcpListener {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+    }
+}
+
+impl TcpListener {
     // Get the file descriptor of the listener
-    pub fn fd(&self) -> i32 {
+    fn fd(&self) -> i32 {
         self.fd
     }
 
     // Create a new TCP listener and bind it to the specified address
     pub fn bind(addr: SocketAddrV4) -> Result<TcpListener> {
-        unsafe {
-            let fd = TcpListener::setup_socket()?; // Syscall: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-            TcpListener::bind_to_address(fd, &addr)?; // Syscall: bind(socket_fd, sockaddr, sockaddr_len)
-            TcpListener::listen(fd)?; // Syscall: listen(socket_fd, backlog)
-            Ok(TcpListener { addr, fd })
-        }
+        let fd = TcpListener::setup_socket()?; // Syscall: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        let listener = TcpListener { fd };
+        listener.bind_to_address(addr)?; // Syscall: bind(socket_fd, sockaddr, sockaddr_len)
+        listener.listen()?; // Syscall: listen(socket_fd, backlog)
+        Ok(listener)
     }
 
     // Accept a new incoming connection and return a TcpStream and client address
@@ -53,10 +64,11 @@ impl TcpListener {
 
             // Check if the accept call was successful
             if client_socket == -1 {
-                Err(format!(
-                    "Error accepting connection: {}",
-                    get_error_message()
-                ))?
+                let errno = os::OS::err_no();
+                if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
+                    return Err(IOError::WouldBlock);
+                }
+                return Err(IOError::SyscallResult(os::OS::err_msg()));
             }
 
             // Create a new TcpStream from the accepted client socket
@@ -80,7 +92,7 @@ impl TcpListener {
             // Check if getting flags was successful
             if flags == -1 {
                 libc::close(self.fd());
-                panic!("Error getting socket flags: {}", get_error_message());
+                return Err(error::IOError::SyscallResult(os::OS::err_msg()));
             }
 
             // Add the O_NONBLOCK flag to the current flags
@@ -89,10 +101,7 @@ impl TcpListener {
             // Check if setting flags was successful
             if result == -1 {
                 libc::close(self.fd());
-                panic!(
-                    "Error setting socket to non-blocking: {}",
-                    get_error_message()
-                );
+                return Err(error::IOError::SyscallResult(os::OS::err_msg()));
             }
 
             Ok(()) // Return Ok if successful
@@ -100,51 +109,53 @@ impl TcpListener {
     }
 
     // Listen for incoming connections
-    unsafe fn listen(fd: i32) -> Result<i32> {
+    fn listen(&self) -> Result<i32> {
         // Start listening on the specified socket file descriptor with a backlog of 10
-        let result = libc::listen(fd, 10); // Syscall: listen(socket_fd, backlog)
+        let result = unsafe { libc::listen(self.fd(), 10) }; // Syscall: listen(socket_fd, backlog)
 
         // Check if the listen call was successful
         if result == -1 {
-            libc::close(fd);
-            panic!("Error starting listening: {}", get_error_message());
+            unsafe { libc::close(self.fd()) };
+            return Err(error::IOError::SyscallResult(os::OS::err_msg()));
         }
 
         Ok(result)
     }
 
     // Set up a socket for the listener
-    unsafe fn setup_socket() -> Result<i32> {
+    fn setup_socket() -> Result<i32> {
         // Create a new socket of type AF_INET (IPv4) and SOCK_STREAM (TCP)
-        let fd = libc::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); // Syscall: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        let fd = unsafe { libc::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP) }; // Syscall: socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
 
         // Check if the socket creation was successful
         if fd == -1 {
-            panic!("Error setting up socket: {}", get_error_message());
+            return Err(error::IOError::SyscallResult(os::OS::err_msg()));
         }
 
         Ok(fd)
     }
 
     // Bind the socket to the specified address
-    unsafe fn bind_to_address(socket_fd: i32, addr: &SocketAddrV4) -> Result<i32> {
+    fn bind_to_address(&self, addr: SocketAddrV4) -> Result<i32> {
         // Convert octets to address.
         let s_addr = u32::from_be_bytes(addr.ip_octets());
         // Create a sockaddr_in.
-        let mut address: sockaddr_in = std::mem::zeroed();
+        let mut address: sockaddr_in = unsafe { std::mem::zeroed() };
         address.sin_addr.s_addr = s_addr;
         address.sin_port = addr.port().to_be();
         address.sin_family = AF_INET as c_ushort;
 
-        let result = libc::bind(
-            socket_fd,
-            &address as *const _ as *const sockaddr,
-            std::mem::size_of::<sockaddr_in>() as c_uint,
-        ); // Syscall: bind(socket_fd, sockaddr, sockaddr_len)
+        let result = unsafe {
+            libc::bind(
+                self.fd(),
+                &address as *const _ as *const sockaddr,
+                std::mem::size_of::<sockaddr_in>() as c_uint,
+            )
+        }; // Syscall: bind(socket_fd, sockaddr, sockaddr_len)
 
         if result == -1 {
-            libc::close(socket_fd);
-            panic!("Error binding to address: {}", get_error_message());
+            unsafe { libc::close(self.fd()) };
+            return Err(error::IOError::SyscallResult(os::OS::err_msg()));
         }
 
         Ok(result)

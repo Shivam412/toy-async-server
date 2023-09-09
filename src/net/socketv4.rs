@@ -1,5 +1,5 @@
 // Define a structure for holding IPv4 socket address information
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SocketAddrV4 {
     octets: [u8; 4],
     port: u16,
